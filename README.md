@@ -1,0 +1,58 @@
+# jevbot
+
+Discord bot that makes [TypeSafe's Jev](https://openrouter.ai/~typesafe/jev-latest) talk — a decision model that "cannot generate text," loomed word-by-word into broken sentences.
+
+Jev is a non-autoregressive decision model. It answers questions with calibrated probabilities, not text. This bot gives it a 20K word vocabulary and asks "next word?" repeatedly via tournament sampling until it forms a reply.
+
+## How it works
+
+1. **Tournament sampling**: 20K vocab shuffled into 255-word buckets, all scored in parallel
+2. **Runoff**: Top-2 from each bucket compete in a final round  
+3. **Completeness judge**: A separate `noul` question asks "is the reply complete?" — jev stops when it thinks it's done
+4. **Penalty system**: Content words penalized 2.5x per reuse, stopwords 1.6x — prevents "is are I is are" loops
+5. **User-only history**: Last 3 user messages included as context; jev's own broken output is excluded (it poisons follow-ups)
+
+## Output examples
+
+- "I love jazz because its improvised and freedom."
+- "Rock.? Yeah"  
+- "No because overkill. Overkill!.!.!"
+- "I depends on on situation of circumstances."
+- "Yuck no ugh spit! Gag gagging ing"
+- "Band is from california in san los angeles. Las angels."
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+Create `.env`:
+```
+DISCORD_TOKEN_JEV=your_discord_bot_token
+OPENROUTER_API_KEY=your_openrouter_key
+```
+
+Enable **Message Content Intent** in Discord developer portal.
+
+```bash
+python jev_bot.py
+```
+
+## Usage
+
+Mention jev or reply to jev's messages. Replies only — it won't respond to messages that don't involve it.
+
+## Cost
+
+~$0.01-0.05 per reply via OpenRouter. Tournament sampling does ~6 API calls per word.
+
+## Vocab
+
+`vocab.txt` is a 20K word list (from [bewinxed/jevgpt](https://github.com/bewinxed/jevgpt)) with slurs removed. Words can be added or removed freely — the vocab IS the content filter.
+
+## Credits
+
+- [TypeSafe AI](https://typesafe.ai) for Jev
+- [bewinxed/jevgpt](https://github.com/bewinxed/jevgpt) for the tournament sampling architecture and vocab
+- Built by [lyra](https://twitter.com/_lyraaaa_) + clod
