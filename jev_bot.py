@@ -1,8 +1,10 @@
 """
-Jev Discord Bot — tournament sampling + history.
+Jev Discord Bot — tournament sampling + phrase-context.
 
-This is the version that produced "I depends on on situation of circumstances."
-20K vocab, bucket tournament, empty descriptions, 3-turn history.
+PHRASE-CONTEXT BRANCH: instead of showing jev bare words {"hello": ""},
+each option shows the full reply with that word appended:
+  {"hello": "Hi I'm Jev hello"}
+Jev judges which complete phrase reads best — the decision it's actually good at.
 """
 
 import os
@@ -110,18 +112,27 @@ async def post(session, state, questions):
     return {}
 
 
-def choice_q(words):
-    return {"type": "choice", "instructions": "Next word?", "criteria": {w: "" for w in words}}
+def choice_q(words, reply_so_far=""):
+    """Each option shows the full reply with that word added.
+    Jev judges which complete phrase reads best — not which bare word is most relevant.
+    This is the difference between word salad and sentences."""
+    criteria = {}
+    for w in words:
+        if w == END:
+            criteria[END] = reply_so_far.rstrip() if reply_so_far else "(end)"
+        else:
+            criteria[w] = (reply_so_far + " " + w).strip() if reply_so_far else w
+    return {"type": "choice", "instructions": "Next word?", "criteria": criteria}
 
 
-async def next_word(session, state, vocab, rng):
+async def next_word(session, state, vocab, rng, reply_so_far=""):
     shuffled = list(vocab)
     rng.shuffle(shuffled)
     buckets = [shuffled[i:i + MAX_CHOICES] for i in range(0, len(shuffled), MAX_CHOICES)]
     groups = [buckets[i:i + QUESTIONS_PER_CALL] for i in range(0, len(buckets), QUESTIONS_PER_CALL)]
 
     results = await asyncio.gather(
-        *(post(session, state, {f"b{gi * QUESTIONS_PER_CALL + i}": choice_q(b)
+        *(post(session, state, {f"b{gi * QUESTIONS_PER_CALL + i}": choice_q(b, reply_so_far)
                                 for i, b in enumerate(g)})
           for gi, g in enumerate(groups)),
         post(session, state, {"complete": {"type": "noul", "instructions": "Is the reply complete?"}}),
@@ -140,7 +151,7 @@ async def next_word(session, state, vocab, rng):
     if END not in finalists:
         finalists.append(END)
 
-    runoff = await post(session, state, {"final": choice_q(finalists[:MAX_CHOICES])})
+    runoff = await post(session, state, {"final": choice_q(finalists[:MAX_CHOICES], reply_so_far)})
     probs = runoff.get("final", {}).get("probabilities", {})
 
     return probs, complete_noul
@@ -164,7 +175,8 @@ async def generate_reply(message, history=None):
             turns.append(f"Jev: {render(words)}")
             state = "\n".join(turns)
 
-            probs, complete = await next_word(session, state, vocab, rng)
+            reply_so_far = render(words)
+            probs, complete = await next_word(session, state, vocab, rng, reply_so_far=reply_so_far)
             if not probs:
                 break
 
