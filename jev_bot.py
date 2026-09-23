@@ -1,14 +1,15 @@
 """
-Jev Discord Bot — tournament sampling + phrase-context.
+Jev Discord Bot — tournament-sampled loomed text from TypeSafe's decision model.
 
-PHRASE-CONTEXT BRANCH: instead of showing jev bare words {"hello": ""},
-each option shows the full reply with that word appended:
-  {"hello": "Hi I'm Jev hello"}
-Jev judges which complete phrase reads best — the decision it's actually good at.
+v1: empty descriptions, "Next word?" — the original broken-grammar jev
+v2: mode D descriptions ("...lastword candidate"), better instructions — more coherent
+
+Run with --v1 for the original style, default is v2.
 """
 
 import os
 import re
+import sys
 import asyncio
 import logging
 import random
@@ -28,13 +29,16 @@ API_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "~typesafe/jev-latest"
 END = "<END>"
 
+# Version flag
+V1_MODE = "--v1" in sys.argv
+
 MAX_CHOICES = 255
-QUESTIONS_PER_CALL = 20
+QUESTIONS_PER_CALL = 20 if V1_MODE else 5   # v1 has empty descs (smaller), v2 needs fewer per call
 TOP_PER_BUCKET = 2
 MAX_WORDS = 30
 MIN_WORDS = 2
 MAX_HISTORY = 3
-STOP_THRESHOLD = 0.5            # let jev stop earlier — the good part is always the first half
+STOP_THRESHOLD = 0.5
 REPEAT_PENALTY = 1.5
 REPEAT_WINDOW = 8
 CONTENT_PENALTY = 2.5
@@ -54,7 +58,7 @@ NO_SPACE_BEFORE = set(".,!?;:)\"'")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jev")
 
-# History
+# History — user-only (jev's own output poisons follow-ups)
 channel_history: dict[int, list[dict]] = defaultdict(list)
 
 def add_history(ch_id, role, content):
@@ -67,7 +71,7 @@ def add_history(ch_id, role, content):
 VOCAB_PATH = Path(__file__).parent / "vocab.txt"
 BANNED = {"unanswered"}
 BASE_VOCAB = [w for w in VOCAB_PATH.read_text().split("\n") if w and w.lower() not in BANNED]
-log.info(f"Loaded {len(BASE_VOCAB)} vocab words")
+log.info(f"Loaded {len(BASE_VOCAB)} vocab words | {'v1' if V1_MODE else 'v2'} mode")
 
 
 def render(tokens):
@@ -103,8 +107,10 @@ async def post(session, state, questions):
     for attempt in range(3):
         try:
             async with session.post(API_URL, json=body, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                data = await r.json()
                 if r.status < 400:
-                    return (await r.json()).get("answers", {})
+                    return data.get("answers", {})
+                log.warning(f"API {r.status}: {str(data.get('error',''))[:200]}")
                 await asyncio.sleep(1 + 2 * attempt)
         except Exception as e:
             log.warning(f"API err {attempt}: {e}")
@@ -113,16 +119,16 @@ async def post(session, state, questions):
 
 
 def choice_q(words, reply_so_far=""):
-    """Each option shows the full reply with that word added.
-    Jev judges which complete phrase reads best — not which bare word is most relevant.
-    This is the difference between word salad and sentences."""
-    criteria = {}
-    for w in words:
-        if w == END:
-            criteria[END] = reply_so_far.rstrip() if reply_so_far else "(end)"
-        else:
-            criteria[w] = (reply_so_far + " " + w).strip() if reply_so_far else w
-    return {"type": "choice", "instructions": "Next word?", "criteria": criteria}
+    if V1_MODE:
+        # v1: empty descriptions, simple instructions
+        return {"type": "choice", "instructions": "Next word?",
+                "criteria": {w: "" for w in words}}
+    else:
+        # v2 (mode D): ...lastword candidate, better instructions
+        last = reply_so_far.split()[-1] if reply_so_far.split() else ""
+        criteria = {w: f"...{last} {w}" if last else w for w in words}
+        return {"type": "choice", "instructions": "Which word continues the reply most naturally?",
+                "criteria": criteria}
 
 
 async def next_word(session, state, vocab, rng, reply_so_far=""):
@@ -175,8 +181,7 @@ async def generate_reply(message, history=None):
             turns.append(f"Jev: {render(words)}")
             state = "\n".join(turns)
 
-            reply_so_far = render(words)
-            probs, complete = await next_word(session, state, vocab, rng, reply_so_far=reply_so_far)
+            probs, complete = await next_word(session, state, vocab, rng, reply_so_far=render(words))
             if not probs:
                 break
 
@@ -206,7 +211,10 @@ async def generate_reply(message, history=None):
     return render(words) if words else "..."
 
 
+# ════════════════════════════════════════════════════════════════
 # Discord
+# ════════════════════════════════════════════════════════════════
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -225,7 +233,7 @@ def should_respond(m):
 
 @bot.event
 async def on_ready():
-    log.info(f"jev online as {bot.user} | vocab {len(BASE_VOCAB)}")
+    log.info(f"jev online as {bot.user} | vocab {len(BASE_VOCAB)} | {'v1' if V1_MODE else 'v2'}")
 
 @bot.event
 async def on_message(m):
@@ -236,7 +244,6 @@ async def on_message(m):
     try:
         async with m.channel.typing():
             async with gen_lock:
-                # Only user messages in history — jev's own broken output poisons follow-ups
                 h = [x for x in channel_history[m.channel.id][:-1] if x["role"] == "user"]
                 r = await generate_reply(c, history=h)
         log.info(f"[OUT] {r}")
