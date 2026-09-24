@@ -33,11 +33,11 @@ END = "<END>"
 V1_MODE = "--v1" in sys.argv
 
 MAX_CHOICES = 255
-QUESTIONS_PER_CALL = 20 if V1_MODE else 5   # v1 has empty descs (smaller), v2 needs fewer per call
+QUESTIONS_PER_CALL = 20 if V1_MODE else 10  # mix mode averages out; pure v1 can pack more
 TOP_PER_BUCKET = 2
 MAX_WORDS = 30
 MIN_WORDS = 2
-MAX_HISTORY = 3
+MAX_HISTORY = 5
 STOP_THRESHOLD = 0.5
 REPEAT_PENALTY = 1.5
 REPEAT_WINDOW = 8
@@ -58,25 +58,39 @@ NO_SPACE_BEFORE = set(".,!?;:)\"'")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jev")
 
-# History — user-only (jev's own output poisons follow-ups)
-channel_history: dict[int, list[dict]] = defaultdict(list)
-
-def add_history(ch_id, role, content):
-    h = channel_history[ch_id]
-    h.append({"role": role, "content": content})
-    if len(h) > MAX_HISTORY:
-        channel_history[ch_id] = h[-MAX_HISTORY:]
+async def fetch_history(channel, before_msg):
+    """Grab last N user messages from channel — rebuilds context from Discord, no caching."""
+    lines = []
+    try:
+        async for msg in channel.history(limit=30, before=before_msg):
+            if msg.author.bot:
+                continue
+            text = (msg.content or "").strip()
+            if not text:
+                continue
+            # Skip bot commands
+            if text.startswith("."):
+                continue
+            lines.append(text)
+            if len(lines) >= MAX_HISTORY:
+                break
+    except Exception:
+        pass
+    lines.reverse()
+    return [{"role": "user", "content": t} for t in lines]
 
 # Vocab
 VOCAB_PATH = Path(__file__).parent / "vocab.txt"
-BANNED = {"unanswered"}
+BANNED = {"unanswered", "\\n"}
 BASE_VOCAB = [w for w in VOCAB_PATH.read_text().split("\n") if w and w.lower() not in BANNED]
-log.info(f"Loaded {len(BASE_VOCAB)} vocab words | {'v1' if V1_MODE else 'v2'} mode")
+log.info(f"Loaded {len(BASE_VOCAB)} vocab words | {'v1' if V1_MODE else 'mix'} mode")
 
 
 def render(tokens):
     out = ""
     for t in tokens:
+        if t == "\\n" or t == "\n":
+            continue
         if not out or out.endswith(("\n", " ")) or t in NO_SPACE_BEFORE:
             out += t
         else:
@@ -118,17 +132,22 @@ async def post(session, state, questions):
     return {}
 
 
-def choice_q(words, reply_so_far=""):
-    if V1_MODE:
-        # v1: empty descriptions, simple instructions
+def choice_q(words, reply_so_far="", force_mode=None):
+    mode = force_mode or ("v1" if V1_MODE else "mix")
+    if mode == "v1":
         return {"type": "choice", "instructions": "Next word?",
                 "criteria": {w: "" for w in words}}
-    else:
-        # v2 (mode D): ...lastword candidate, better instructions
+    elif mode == "v2":
         last = reply_so_far.split()[-1] if reply_so_far.split() else ""
         criteria = {w: f"...{last} {w}" if last else w for w in words}
-        return {"type": "choice", "instructions": "Which word continues the reply most naturally?",
+        return {"type": "choice", "instructions": "Next word?",
                 "criteria": criteria}
+    else:
+        # mix: randomly v1 or v2 each call
+        if random.random() < 0.5:
+            return choice_q(words, reply_so_far, force_mode="v1")
+        else:
+            return choice_q(words, reply_so_far, force_mode="v2")
 
 
 async def next_word(session, state, vocab, rng, reply_so_far=""):
@@ -233,18 +252,17 @@ def should_respond(m):
 
 @bot.event
 async def on_ready():
-    log.info(f"jev online as {bot.user} | vocab {len(BASE_VOCAB)} | {'v1' if V1_MODE else 'v2'}")
+    log.info(f"jev online as {bot.user} | vocab {len(BASE_VOCAB)} | {'v1' if V1_MODE else 'mix'}")
 
 @bot.event
 async def on_message(m):
     if not should_respond(m): return
     c = strip_mention(m.content, bot.user.id) or "hello"
     log.info(f"[IN] {m.author}: {c[:80]}")
-    add_history(m.channel.id, "user", c)
     try:
         async with m.channel.typing():
             async with gen_lock:
-                h = [x for x in channel_history[m.channel.id][:-1] if x["role"] == "user"]
+                h = await fetch_history(m.channel, m)
                 r = await generate_reply(c, history=h)
         log.info(f"[OUT] {r}")
         await m.reply(r, mention_author=False)
