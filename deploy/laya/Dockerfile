@@ -3,7 +3,7 @@
 # Built from the PyPI package rather than a vendored checkout -- upstream publishes
 # `laya[serve]` (Apache-2.0, https://laya.convaiinnovations.com) and ships no registry
 # image. CPU wheels by default; build with TORCH_INDEX=cu128 for an NVIDIA host.
-ARG PYTHON_IMAGE=python:3.11-slim-bookworm
+ARG PYTHON_IMAGE=python:3.14-slim-bookworm
 FROM ${PYTHON_IMAGE}
 
 ARG TORCH_INDEX=cpu
