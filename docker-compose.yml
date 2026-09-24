@@ -1,13 +1,15 @@
-# jevbot against a self-hosted Laya.
+# jevbot against a self-hosted Laya, both images pulled from ghcr.
 #
 #   cp deploy/jevbot.env.example deploy/jevbot.env   # Discord token + a Laya API key
 #   cp deploy/laya.env.example  deploy/laya.env      # the same Laya API key
-#   docker compose up --build
+#   docker compose pull && docker compose up
 #
-# Both services are CPU by default and work on macOS and Linux. For an NVIDIA host add
-# LAYA_TORCH_INDEX=cu128 and give laya-serve a GPU reservation.
+# To build both from source instead of pulling: docker compose up --build
+# Both services are CPU by default and work on macOS and Linux. For an NVIDIA host
+# add LAYA_TORCH_INDEX=cu128 and give laya-serve a GPU reservation.
 services:
   laya-serve:
+    image: ghcr.io/cschmittiey/jevbot-laya:latest
     build:
       context: ./deploy/laya
       args:
@@ -29,6 +31,7 @@ services:
     restart: unless-stopped
 
   jevbot:
+    image: ghcr.io/cschmittiey/jevbot:latest
     build: .
     env_file: [./deploy/jevbot.env]
     environment:
