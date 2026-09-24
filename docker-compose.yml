@@ -1,0 +1,43 @@
+# jevbot against a self-hosted Laya.
+#
+#   cp deploy/jevbot.env.example deploy/jevbot.env   # Discord token + a Laya API key
+#   cp deploy/laya.env.example  deploy/laya.env      # the same Laya API key
+#   docker compose up --build
+#
+# Both services are CPU by default and work on macOS and Linux. For an NVIDIA host add
+# LAYA_TORCH_INDEX=cu128 and give laya-serve a GPU reservation.
+services:
+  laya-serve:
+    build:
+      context: ./deploy/laya
+      args:
+        TORCH_INDEX: "${LAYA_TORCH_INDEX:-cpu}"
+    env_file: [./deploy/laya.env]
+    environment:
+      # Preload so the first request does not pay for the checkpoint build, and keep to
+      # one checkpoint (~800MB) instead of the 2.5GB bundle.
+      LAYA_PRELOAD: "1"
+      LAYA_MODELS: "${LAYA_MODELS:-english}"
+      LAYA_DEVICE: "${LAYA_DEVICE:-cpu}"
+      LAYA_THREADS: "${LAYA_THREADS:-4}"
+    volumes:
+      - laya-cache:/home/laya/.cache/huggingface
+    # Loopback only, and only for curl/troubleshooting -- the bot reaches this over the
+    # compose network. The API has no auth unless LAYA_API_KEY is set, which laya.env does.
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  jevbot:
+    build: .
+    env_file: [./deploy/jevbot.env]
+    environment:
+      JEV_BACKEND: laya
+      LAYA_URL: "http://laya-serve:8000"
+    depends_on:
+      laya-serve:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  laya-cache:

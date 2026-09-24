@@ -1,0 +1,7 @@
+.git
+.env
+deploy/*.env
+*.pyc
+__pycache__
+.venv
+worktrees

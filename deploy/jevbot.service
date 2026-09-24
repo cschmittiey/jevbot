@@ -1,0 +1,63 @@
+[Unit]
+Description=jev Discord bot (looms text from a local Laya decision engine)
+Documentation=https://github.com/ellie/jevbot
+# jevbot is useless without laya-serve, so start after it; the bot retries anyway.
+Wants=network-online.target
+After=network-online.target laya-serve.service
+
+[Service]
+Type=simple
+User=jevbot
+Group=jevbot
+WorkingDirectory=/opt/jevbot
+EnvironmentFile=/etc/jevbot/jevbot.env
+Environment=JEV_BACKEND=laya
+Environment=LAYA_URL=http://127.0.0.1:8000
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/jevbot/.venv/bin/python /opt/jevbot/jev_bot.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+# Hardening. The bot only reads its own directory and talks to Discord + laya, so it needs
+# no writes, no home, and no kernel surface. ProtectHome=yes means /root and /home are
+# invisible; keep the install under /opt.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
+
+# Install:
+#   sudo useradd --system --home /opt/jevbot --shell /usr/sbin/nologin jevbot
+#   sudo install -d -o jevbot -g jevbot /opt/jevbot /etc/jevbot
+#   sudo git clone <repo> /opt/jevbot && sudo chown -R jevbot:jevbot /opt/jevbot
+#   sudo -u jevbot python3 -m venv /opt/jevbot/.venv
+#   sudo -u jevbot /opt/jevbot/.venv/bin/pip install -r /opt/jevbot/requirements.txt
+#   sudo cp deploy/jevbot.env.example /etc/jevbot/jevbot.env
+#   sudo chmod 600 /etc/jevbot/jevbot.env && sudo chown root:root /etc/jevbot/jevbot.env
+#   sudo install -m 0644 deploy/jevbot.service /etc/systemd/system/jevbot.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jevbot
+#
+# Note: EnvironmentFile is read as root before privileges drop, so 0600 root:root works.
+# (Untested on macOS: there is no systemd there. See deploy/laya-serve.plist instead.)

@@ -1,0 +1,76 @@
+[Unit]
+Description=Laya System 1 decision engine (laya-serve), Jev-compatible /v1/systemone
+Documentation=https://laya.convaiinnovations.com/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=layaserve
+Group=layaserve
+WorkingDirectory=/var/lib/laya-serve
+
+# CPU by default. Set LAYA_DEVICE=cuda on a host with the NVIDIA driver; the CUDA torch
+# wheel is a build-time choice (see deploy/laya/Dockerfile for TORCH_INDEX).
+Environment=LAYA_HOST=127.0.0.1
+Environment=LAYA_PORT=8000
+Environment=LAYA_DEVICE=cpu
+# Preload so the first request does not pay for the checkpoint build, and load one
+# checkpoint (~800MB) instead of the 2.5GB bundle.
+Environment=LAYA_PRELOAD=1
+Environment=LAYA_MODELS=english
+# Keep at or below physical cores; oversubscribing the logical count is a large regression.
+Environment=LAYA_THREADS=4
+Environment=OMP_NUM_THREADS=4
+Environment=HF_HOME=/var/lib/laya-serve/hf
+Environment=PYTHONUNBUFFERED=1
+
+# The bearer token never enters the environment file or the unit: it is passed as a
+# systemd credential and exported by the shell that execs the server.
+LoadCredential=laya_api_key:/etc/laya/api_key
+ExecStart=/bin/sh -c 'export LAYA_API_KEY="$(cat "$CREDENTIALS_DIRECTORY/laya_api_key")"; exec /opt/laya/.venv/bin/laya-serve'
+
+StateDirectory=laya-serve
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# No MemoryDenyWriteExecute here: torch may JIT/allocate executable pages.
+
+[Install]
+WantedBy=multi-user.target
+
+# Install:
+#   sudo useradd --system --home /var/lib/laya-serve --shell /usr/sbin/nologin layaserve
+#   sudo install -d -o layaserve -g layaserve /opt/laya
+#   sudo -u layaserve python3 -m venv /opt/laya/.venv
+#   sudo -u layaserve /opt/laya/.venv/bin/pip install "laya[serve]==0.3.20"
+#   printf 'Bearer key, no newline needed:\n'
+#   sudo install -d -m 0750 /etc/laya
+#   openssl rand -hex 32 | sudo tee /etc/laya/api_key >/dev/null
+#   sudo chmod 600 /etc/laya/api_key
+#   sudo install -m 0644 deploy/laya-serve.service /etc/systemd/system/laya-serve.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now laya-serve
+#   curl -s localhost:8000/health   # -> {"status":"ok","loaded":["english"],"device":"cpu"}
+#
+# (Untested on macOS: there is no systemd there. On Apple silicon use the plist instead;
+#  the container path cannot reach the Apple GPU, so MPS needs a native process.)

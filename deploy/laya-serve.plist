@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS equivalent of deploy/laya-serve.service, for Apple silicon.
+
+  Why a native process and not a container: Docker Desktop runs Linux containers in a VM
+  that cannot see the Apple GPU, so LAYA_DEVICE=mps only works natively. Measured on an
+  M-series Mac: checkpoint load 3.3s, 20x10 word-step request ~0.23s, /health 3s after boot.
+
+  Paths below are absolute and Mac-specific -- adjust them. Install:
+
+    python3 -m venv ~/.local/share/jevbot/laya-venv
+    ~/.local/share/jevbot/laya-venv/bin/pip install "laya[serve]==0.3.20"
+    openssl rand -hex 32 > ~/.local/share/jevbot/laya_api_key && chmod 600 that file
+    # then point LAYA_API_KEY_FILE at it below, and:
+    cp deploy/laya-serve.plist ~/Library/LaunchAgents/com.jevbot.laya-serve.plist
+    launchctl load ~/Library/LaunchAgents/com.jevbot.laya-serve.plist
+    curl -s localhost:8000/health
+
+  The bot can then run either natively or in the distroless container. In the container
+  case set LAYA_URL=http://host.docker.internal:8000 in deploy/jevbot.env.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jevbot.laya-serve</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <!-- laya.serve reads LAYA_API_KEY, not LAYA_API_KEY_FILE (only upstream's Docker
+             entrypoint implements the *_FILE form), so read the file here and export it. -->
+        <string>export LAYA_API_KEY="$(cat /Users/ellie/.local/share/jevbot/laya_api_key)"; exec /Users/ellie/.local/share/jevbot/laya-venv/bin/laya-serve</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LAYA_HOST</key>
+        <string>127.0.0.1</string>
+        <key>LAYA_PORT</key>
+        <string>8000</string>
+        <key>LAYA_DEVICE</key>
+        <string>mps</string>
+        <key>LAYA_PRELOAD</key>
+        <string>1</string>
+        <key>LAYA_MODELS</key>
+        <string>english</string>
+        <key>HF_HOME</key>
+        <string>/Users/ellie/.cache/huggingface</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ellie/Library/Logs/laya-serve.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/ellie/Library/Logs/laya-serve.err.log</string>
+</dict>
+</plist>

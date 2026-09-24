@@ -5,6 +5,11 @@ v1: empty descriptions, "Next word?" — the original broken-grammar jev
 v2: mode D descriptions ("...lastword candidate"), better instructions — more coherent
 
 Run with --v1 for the original style, default is v2.
+
+Run with --laya (or JEV_BACKEND=laya) to loom against a self-hosted laya-serve instead of
+the hosted decisions API. Laya speaks the same /v1/systemone protocol and returns the same
+answer shape, but it enforces much smaller option and question budgets, so each step
+samples the vocab in 20x10 buckets rather than scoring all 255-per-question.
 """
 
 import os
@@ -23,11 +28,50 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN = os.environ["DISCORD_TOKEN_JEV"]
-OPENROUTER_KEY = os.environ["OPENROUTER_API_KEY"]
+
+def _env_or_file(name):
+    """Read NAME, or the file named by NAME_FILE -- keeps container secrets out of the env."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        return Path(path).read_text().strip()
+    return os.environ.get(name)
+
+
+TOKEN = _env_or_file("DISCORD_TOKEN_JEV")
+if not TOKEN:
+    raise SystemExit("DISCORD_TOKEN_JEV (or DISCORD_TOKEN_JEV_FILE) is required")
+OPENROUTER_KEY = _env_or_file("OPENROUTER_API_KEY")
 API_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "~typesafe/jev-latest"
 END = "<END>"
+
+# Backend: "jev" is the hosted OpenRouter decisions API, "laya" is a self-hosted
+# laya-serve. Laya speaks the same /v1/systemone wire protocol, so the swap is the base
+# URL, the bearer key and the request shape -- not the response shape.
+BACKEND = os.environ.get("JEV_BACKEND", "laya" if "--laya" in sys.argv else "jev")
+LAYA_URL = os.environ.get("LAYA_URL", "http://127.0.0.1:8000").rstrip("/")
+LAYA_API_URL = LAYA_URL + "/v1/systemone"
+LAYA_KEY = _env_or_file("LAYA_API_KEY") or ""
+
+# Measured limits on laya-serve 0.3.20 / english checkpoint. MAX_QUESTIONS=64 is a hard
+# module constant in laya/serve.py (413 above it, and the completeness noul counts), and
+# the per-question option ceiling is a token budget rather than a count: 150 bare vocab
+# words passed on 8/8 random slices, 200 on 5/8, 220 on 0/8. Jev's hosted API takes 255
+# options per question, so this is the one place the backends really differ.
+LAYA_MAX_QUESTIONS = 63   # 64 minus the "complete" noul
+LAYA_MAX_OPTIONS = 150
+LAYA_QUESTIONS_PER_STEP = int(os.environ.get("JEV_QUESTIONS_PER_STEP", 20))
+LAYA_OPTIONS_PER_QUESTION = int(os.environ.get("JEV_OPTIONS_PER_QUESTION", 10))
+
+# The option ceiling is a token budget that moves with the words drawn, so a request can be
+# rejected at a size that worked moments earlier. Once a size is known to fit, remember it,
+# or every later step pays for the rejected round trip again.
+_laya_options_fit = None
+
+
+def _laya_option_budget():
+    cap = LAYA_MAX_OPTIONS if _laya_options_fit is None else min(LAYA_MAX_OPTIONS, _laya_options_fit)
+    return max(2, min(LAYA_OPTIONS_PER_QUESTION, cap))
 
 # Version flag
 V1_MODE = "--v1" in sys.argv
@@ -84,6 +128,14 @@ VOCAB_PATH = Path(__file__).parent / "vocab.txt"
 BANNED = {"unanswered", "\\n"}
 BASE_VOCAB = [w for w in VOCAB_PATH.read_text().split("\n") if w and w.lower() not in BANNED]
 log.info(f"Loaded {len(BASE_VOCAB)} vocab words | {'v1' if V1_MODE else 'mix'} mode")
+if BACKEND == "laya":
+    log.info(f"backend: laya -> {LAYA_API_URL} "
+             f"({LAYA_QUESTIONS_PER_STEP}x{LAYA_OPTIONS_PER_QUESTION} options per step)")
+else:
+    if not OPENROUTER_KEY:
+        raise SystemExit("OPENROUTER_API_KEY is required for the jev backend "
+                         "(set it, or run with --laya / JEV_BACKEND=laya)")
+    log.info(f"backend: jev -> {API_URL} ({MODEL})")
 
 
 def render(tokens):
@@ -130,6 +182,36 @@ async def post(session, state, questions):
             log.warning(f"API err {attempt}: {e}")
             await asyncio.sleep(1 + 2 * attempt)
     return {}
+
+
+async def laya_post(session, state, questions):
+    """POST one laya-serve request. Returns (status, answers, detail); status 0 = transport
+    failure and status 413/422 carry the server's detail string.
+
+    Unlike the hosted API, laya's errors are actionable: 413 when a request carries more
+    than 64 questions, 422 when one question's options overflow its token budget. Both are
+    returned to the caller to shrink and retry instead of being retried blindly.
+    """
+    body = {"state": state, "questions": questions}
+    for attempt in range(3):
+        try:
+            async with session.post(LAYA_API_URL, json=body,
+                                    timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status < 400:
+                    return r.status, (await r.json()).get("answers", {}), ""
+                detail = ""
+                try:
+                    detail = str((await r.json()).get("detail", ""))[:200]
+                except Exception:
+                    pass
+                if r.status in (413, 422):
+                    return r.status, {}, detail
+                log.warning(f"laya {r.status}: {detail}")
+                await asyncio.sleep(1 + 2 * attempt)
+        except Exception as e:
+            log.warning(f"laya err {attempt}: {e}")
+            await asyncio.sleep(1 + 2 * attempt)
+    return 0, {}, "transport failure"
 
 
 def choice_q(words, reply_so_far="", force_mode=None):
@@ -182,12 +264,69 @@ async def next_word(session, state, vocab, rng, reply_so_far=""):
     return probs, complete_noul
 
 
+async def next_word_laya(session, state, vocab, rng, reply_so_far=""):
+    """The same tournament, widened into questions instead of options.
+
+    Jev scores 255 options in one question. laya-serve runs out of token budget around 150
+    bare words and rejects more than 64 questions per request, so the opening sweep is
+    LAYA_QUESTIONS_PER_STEP questions of LAYA_OPTIONS_PER_QUESTION words each -- 20x10 by
+    default, i.e. 200 candidate words per step at ~0.28s measured -- with a runoff over the
+    bucket winners exactly as the hosted path does. The cost is candidate coverage: this
+    samples the vocab per step instead of scoring all of it.
+    """
+    nq = max(1, min(LAYA_QUESTIONS_PER_STEP, LAYA_MAX_QUESTIONS))
+    k = _laya_option_budget()
+    shuffled = list(vocab)
+    rng.shuffle(shuffled)
+    buckets = [shuffled[i:i + k] for i in range(0, min(len(shuffled), nq * k), k)]
+
+    while True:
+        questions = {f"b{i}": choice_q(b, reply_so_far) for i, b in enumerate(buckets)}
+        questions["complete"] = {"type": "noul", "instructions": "Is the reply complete?"}
+        status, payload, detail = await laya_post(session, state, questions)
+        if status == 200:
+            break
+        if status in (413, 422) and len(buckets) > 1 and len(buckets[0]) > 2:
+            # the option ceiling moves with the words picked, so shrink and try again,
+            # and remember the size that fit for the rest of this process
+            global _laya_options_fit
+            buckets = [b[:max(2, len(b) // 2)] for b in buckets]
+            _laya_options_fit = len(buckets[0])
+            log.warning(f"laya {status} ({detail}): retrying at "
+                        f"{len(buckets)}x{len(buckets[0])} options")
+            continue
+        log.error(f"laya request failed: {status} {detail}")
+        return {}, 0.0
+
+    complete_noul = payload.get("complete", {}).get("noul", 0)
+
+    finalists = []
+    for qid, ans in payload.items():
+        if "probabilities" not in ans:
+            continue
+        ranked = sorted(ans["probabilities"].items(), key=lambda kv: -kv[1])
+        finalists += [w for w, p in ranked[:TOP_PER_BUCKET] if p > 0]
+
+    if END not in finalists:
+        finalists.append(END)
+    finalists = list(dict.fromkeys(finalists))
+
+    status, runoff, detail = await laya_post(
+        session, state, {"final": choice_q(finalists[:LAYA_MAX_OPTIONS], reply_so_far)})
+    if status != 200:
+        log.error(f"laya runoff failed: {status} {detail}")
+    probs = runoff.get("final", {}).get("probabilities", {}) if status == 200 else {}
+
+    return probs, complete_noul
+
+
 async def generate_reply(message, history=None):
     rng = random.Random()
     vocab = vocabulary(message)
     words = []
 
-    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
+    key = LAYA_KEY if BACKEND == "laya" else OPENROUTER_KEY
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     async with aiohttp.ClientSession(headers=headers) as session:
         for step in range(MAX_WORDS):
@@ -200,7 +339,8 @@ async def generate_reply(message, history=None):
             turns.append(f"Jev: {render(words)}")
             state = "\n".join(turns)
 
-            probs, complete = await next_word(session, state, vocab, rng, reply_so_far=render(words))
+            sweep = next_word_laya if BACKEND == "laya" else next_word
+            probs, complete = await sweep(session, state, vocab, rng, reply_so_far=render(words))
             if not probs:
                 break
 
@@ -252,7 +392,8 @@ def should_respond(m):
 
 @bot.event
 async def on_ready():
-    log.info(f"jev online as {bot.user} | vocab {len(BASE_VOCAB)} | {'v1' if V1_MODE else 'mix'}")
+    log.info(f"jev online as {bot.user} | vocab {len(BASE_VOCAB)} | "
+             f"{'v1' if V1_MODE else 'mix'} | backend {BACKEND}")
 
 @bot.event
 async def on_message(m):
