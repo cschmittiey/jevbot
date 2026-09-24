@@ -4,18 +4,7 @@ Discord bot that makes [TypeSafe's Jev](https://openrouter.ai/~typesafe/jev-late
 
 Jev is a non-autoregressive decision model. It answers questions with calibrated probabilities, not text. This bot gives it a 20K word vocabulary and asks "next word?" repeatedly via tournament sampling until it forms a reply.
 
-It can loom against either backend:
-
-| | `jev` (default) | `laya` |
-| --- | --- | --- |
-| Where | TypeSafe's hosted API via OpenRouter | self-hosted [`laya-serve`](https://laya.convaiinnovations.com/) |
-| Options per question | up to 255 | ~150 bare words — a token budget, not a count |
-| Questions per request | no local limit | **64 hard cap** (`413` above it, and the noul counts) |
-| Candidates per word step | the whole 20K vocab | 200 by default (20 questions x 10 words) |
-| Cost per reply | ~$0.01–0.05 | $0 — your own hardware |
-| Word-step latency | network round trips | ~0.28s measured on an M-series GPU |
-
-Laya speaks the same `POST /v1/systemone` protocol and returns the same answer shape (`answers[qid].probabilities`, `answers[qid].noul`), so the swap is the base URL, a bearer key and the request shape. See [Backends](#backends) for the measured limits.
+A fork of [lyramakesmusic/jevbot](https://github.com/lyramakesmusic/jevbot), which runs against hosted Jev only. This fork adds a self-hosted [Laya](https://laya.convaiinnovations.com/) backend, packaging for macOS and Linux, and CI publishing images to `ghcr.io/cschmittiey/jevbot` and `ghcr.io/cschmittiey/jevbot-laya`.
 
 ## How it works
 
@@ -36,44 +25,10 @@ Hosted Jev:
 - "Yuck no ugh spit! Gag gagging ing"
 - "Band is from california in san los angeles. Las angels."
 
-Real replies loomed through a local Laya, for comparison:
+Through a local Laya, for comparison:
 
 - "Unlimited great admire praise admiration jazzy"
 - "Answers phones answered information users info"
-- "Share user entering entered scams invaders"
-- "Ok verdict okay alright accept accepts ok uncertainty verdict simpler verdict"
-
-## Backends
-
-`JEV_BACKEND=jev` (default) or `JEV_BACKEND=laya`; `--laya` is shorthand for the latter.
-The Laya backend needs `LAYA_URL` (default `http://127.0.0.1:8000`) and `LAYA_API_KEY` if the
-server was started with one. Both secrets accept a `*_FILE` sibling
-(`DISCORD_TOKEN_JEV_FILE`, `LAYA_API_KEY_FILE`) so container secrets need not be env vars.
-
-### Laya's limits, measured
-
-Laya's budgets are smaller than Jev's and two of them bite this bot directly. All measured
-against `laya-serve` 0.3.20 with the english checkpoint:
-
-- **Options per question are a token budget, not a count.** A question's options share
-  `head_max_len` (192 tokens; 256 on the multilingual/typed-decisions checkpoints) and the
-  whole sequence shares `max_len` (512). 150 bare vocab words passed on 8/8 random slices,
-  200 on 5/8, 220 on 0/8. Going over is a hard `422`, not a silent trim — and because the
-  cost depends on which words were drawn, the ceiling moves from step to step.
-- **64 questions per request**, a module constant in `laya/serve.py` and not configurable.
-  The completeness `noul` counts, so the ceiling is 63 word questions plus it. Over is a `413`.
-- **Choice questions with 11+ options are uncalibrated.** The checkpoint ships
-  `choice:11+=0.1006`, below Laya's `TEMP_MIN` of 0.5, so the runtime clamps it to 0.5 and
-  warns on load. This bot samples *relatively* from those probabilities rather than
-  thresholding on them, so the ranking still works — but the distribution's sharpness is not
-  the trained one.
-- So this backend scores **200 candidates per word step, not the whole vocab**. That is the
-  real cost of self-hosting here. Raise `JEV_QUESTIONS_PER_STEP` (up to 63) or
-  `JEV_OPTIONS_PER_QUESTION` (stay under ~150) to trade latency for coverage: 40 x 10
-  (~320 candidates) measures ~0.4s per step instead of ~0.28s.
-
-If a request is rejected anyway, the bot halves the bucket size, retries, and remembers the
-size that fit for the rest of the process, so it pays that round trip once rather than per step.
 
 ## Setup
 
@@ -81,72 +36,36 @@ size that fit for the rest of the process, so it pays that round trip once rathe
 pip install -r requirements.txt
 ```
 
-Create `.env`:
-```
-DISCORD_TOKEN_JEV=your_discord_bot_token
-```
-
-For the hosted backend, add `OPENROUTER_API_KEY=...`. For Laya, add:
-```
-JEV_BACKEND=laya
-LAYA_URL=http://127.0.0.1:8000
-LAYA_API_KEY=whatever_you_started_laya_serve_with
-```
-
-Enable **Message Content Intent** in Discord developer portal.
-
-## Running Laya
-
-`laya-serve` needs Python 3.10+, torch, and ~800MB of weights on first boot:
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install "laya[serve]==0.3.20"
-LAYA_DEVICE=mps LAYA_PRELOAD=1 LAYA_MODELS=english LAYA_API_KEY=$(openssl rand -hex 32) \
-  .venv/bin/laya-serve          # -> {"status":"ok","loaded":["english"],"device":"mps"}
-```
-
-`LAYA_DEVICE` is `cpu`, `cuda` or `mps` — on Apple silicon `mps` uses the GPU and needs a
-native process, because a Linux container cannot see the Apple GPU. `LAYA_PRELOAD=1` builds
-checkpoints before the server binds, so a healthy `/health` means ready. `LAYA_MODELS=english`
-keeps the download to ~800MB instead of the 2.5GB bundle.
+`.env` needs `DISCORD_TOKEN_JEV=...`, plus `OPENROUTER_API_KEY=...` for hosted Jev, or `JEV_BACKEND=laya` with `LAYA_URL` and `LAYA_API_KEY` for Laya. Enable **Message Content Intent** in the Discord developer portal.
 
 ```bash
 python jev_bot.py            # hosted Jev
 python jev_bot.py --laya     # self-hosted Laya
 ```
 
+## Running Laya
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install "laya[serve]==0.3.20"
+LAYA_DEVICE=mps LAYA_PRELOAD=1 LAYA_MODELS=english LAYA_API_KEY=$(openssl rand -hex 32) \
+  .venv/bin/laya-serve
+```
+
+`LAYA_DEVICE` is `cpu`, `cuda` or `mps`; on Apple silicon `mps` uses the GPU but needs a native process, since a container cannot see it. Laya's option and question budgets are much smaller than Jev's, so this backend scores 200 candidates per word step instead of the whole 20K vocab — the knobs and the measured limits are commented in `jev_bot.py`.
+
 ## Deploying
 
-Three paths, same bot code.
-
-**Containers (macOS or Linux).** The bot image is distroless (127MB, no torch); Laya is a
-separate service because it carries torch and the weights.
+Both images are on ghcr, so deploying is pull and run:
 
 ```bash
 cp deploy/jevbot.env.example deploy/jevbot.env   # Discord token + Laya key
 cp deploy/laya.env.example  deploy/laya.env      # the same Laya key
-docker compose up --build
+docker compose pull && docker compose up
 ```
 
-`laya-serve` publishes on loopback only and preloads before it reports healthy, so `up` waits
-for a usable engine. NVIDIA hosts: build with `LAYA_TORCH_INDEX=cu128` and add a GPU
-reservation to the `laya-serve` service.
+`docker compose up --build` builds from source instead. The bot image is distroless (127MB, no torch); Laya is separate because it carries torch and the weights. NVIDIA hosts build with `LAYA_TORCH_INDEX=cu128`.
 
-**systemd (Linux, no containers).** `deploy/jevbot.service` and `deploy/laya-serve.service`
-run a venv install of each half, with install instructions in the unit comments. The Laya unit
-passes its bearer token as a systemd credential rather than an environment file, so the key
-never lands in a unit or an env file.
-
-**launchd (macOS, for Apple GPU inference).** `deploy/laya-serve.plist` runs Laya natively with
-`LAYA_DEVICE=mps`; the paths inside are Mac-specific and need adjusting.
-
-Mixing is fine, and is the fastest setup on a Mac: Laya native on the GPU, bot in the
-container, with `LAYA_URL=http://host.docker.internal:8000` in `deploy/jevbot.env`.
-
-The systemd units and the plist were written on macOS and **have not been executed** — there is
-no systemd here, and the launchd job was not loaded. The Docker path was built and run: the
-image imports its deps on distroless, fails cleanly without a token, and reaches Laya from
-inside the container.
+`deploy/` also has systemd units for each half and a launchd plist that runs Laya natively on macOS for Apple GPU inference — the fastest setup on a Mac, with the bot in a container and `LAYA_URL=http://host.docker.internal:8000`. The units and the plist **have not been executed**; only the Docker path has been built and run.
 
 ## Usage
 
@@ -154,11 +73,7 @@ Mention jev or reply to jev's messages. Replies only — it won't respond to mes
 
 ## Cost
 
-Against hosted Jev, ~$0.01-0.05 per reply via OpenRouter. Tournament sampling does ~6 API
-calls per word. Against a local Laya, inference is free: a word step is two batched forward
-passes (a sweep and a runoff), measured at ~0.28s plus ~0.19s for a 20 x 10 step on an
-M-series GPU. Laya's response includes a `usage` block (`input_tokens`, always 0 output
-tokens — it never generates text) if you want to size hardware.
+Against hosted Jev, ~$0.01-0.05 per reply via OpenRouter at ~6 API calls per word. Against a local Laya it is free, and a word step measures ~0.28s on an M-series GPU.
 
 ## Vocab
 
@@ -169,4 +84,4 @@ tokens — it never generates text) if you want to size hardware.
 - [TypeSafe AI](https://typesafe.ai) for Jev
 - [bewinxed/jevgpt](https://github.com/bewinxed/jevgpt) for the tournament sampling architecture and vocab
 - [ConvAI Innovations](https://laya.convaiinnovations.com/) for Laya, the Apache-2.0 decision engine
-- Built by [lyra](https://twitter.com/_lyraaaa_) + clod
+- Built by [lyra](https://twitter.com/_lyraaaa_) + clod; Laya backend and packaging by [cschmittiey](https://github.com/cschmittiey)
