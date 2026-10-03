@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # The bot, on distroless. It deliberately needs no torch: Laya runs as its own service
 # (see docker-compose.yml) and is reached over HTTP, which is what keeps this image small.
-ARG PYTHON_IMAGE=python:3.11-slim-bookworm
+ARG PYTHON_IMAGE=python:3.14-slim-bookworm
 ARG RUNTIME_IMAGE=gcr.io/distroless/python3-debian12:nonroot
 
 FROM ${PYTHON_IMAGE} AS build
